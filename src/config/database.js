@@ -1,47 +1,92 @@
-const mongoose = require('mongoose');
+const { Pool } = require('pg');
+const config = require('./index');
 
-const connectDatabase = async () => {
-    const mongoUri = process.env.MONGODB_URI || 'mongodb://localhost:27017/chirpboard';
-    
-    const options = {
-        maxPoolSize: 10,
-        serverSelectionTimeoutMS: 5000,
-        socketTimeoutMS: 45000,
-    };
+class Database {
+  constructor() {
+    this.pool = null;
+    this.isConnected = false;
+  }
 
-    try {
-        const connection = await mongoose.connect(mongoUri, options);
-        console.log(`MongoDB connected: ${connection.connection.host}`);
-        
-        mongoose.connection.on('error', (err) => {
-            console.error('MongoDB connection error:', err);
-        });
-
-        mongoose.connection.on('disconnected', () => {
-            console.warn('MongoDB disconnected. Attempting to reconnect...');
-        });
-
-        mongoose.connection.on('reconnected', () => {
-            console.log('MongoDB reconnected');
-        });
-
-        return connection;
-    } catch (error) {
-        console.error('Failed to connect to MongoDB:', error.message);
-        process.exit(1);
+  async connect() {
+    if (this.pool) {
+      return this.pool;
     }
-};
 
-const disconnectDatabase = async () => {
+    this.pool = new Pool({
+      connectionString: config.database.url,
+      max: config.database.poolSize || 10,
+      idleTimeoutMillis: 30000,
+      connectionTimeoutMillis: 2000,
+    });
+
+    this.pool.on('error', (err) => {
+      console.error('Unexpected error on idle client', err);
+      this.isConnected = false;
+    });
+
+    this.pool.on('connect', () => {
+      this.isConnected = true;
+    });
+
+    // Test the connection
     try {
-        await mongoose.connection.close();
-        console.log('MongoDB connection closed');
-    } catch (error) {
-        console.error('Error closing MongoDB connection:', error.message);
+      const client = await this.pool.connect();
+      client.release();
+      this.isConnected = true;
+      console.log('Database connected successfully');
+    } catch (err) {
+      console.error('Database connection failed:', err.message);
+      throw err;
     }
-};
 
-module.exports = {
-    connectDatabase,
-    disconnectDatabase
-};
+    return this.pool;
+  }
+
+  async disconnect() {
+    if (this.pool) {
+      await this.pool.end();
+      this.pool = null;
+      this.isConnected = false;
+      console.log('Database disconnected');
+    }
+  }
+
+  getPool() {
+    if (!this.pool) {
+      throw new Error('Database not connected. Call connect() first.');
+    }
+    return this.pool;
+  }
+
+  async query(text, params) {
+    const start = Date.now();
+    try {
+      const result = await this.getPool().query(text, params);
+      const duration = Date.now() - start;
+      if (config.env === 'development') {
+        console.log('Executed query', { text: text.substring(0, 50), duration, rows: result.rowCount });
+      }
+      return result;
+    } catch (err) {
+      console.error('Query error:', { text: text.substring(0, 50), error: err.message });
+      throw err;
+    }
+  }
+
+  async transaction(callback) {
+    const client = await this.getPool().connect();
+    try {
+      await client.query('BEGIN');
+      const result = await callback(client);
+      await client.query('COMMIT');
+      return result;
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+}
+
+module.exports = new Database();
