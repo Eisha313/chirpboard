@@ -1,92 +1,68 @@
 const { Pool } = require('pg');
 const config = require('./index');
 
-class Database {
-  constructor() {
-    this.pool = null;
-    this.isConnected = false;
-  }
+const pool = new Pool({
+  host: config.database.host,
+  port: config.database.port,
+  database: config.database.name,
+  user: config.database.user,
+  password: config.database.password,
+  max: 20,
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 2000,
+});
 
-  async connect() {
-    if (this.pool) {
-      return this.pool;
-    }
+pool.on('error', (err) => {
+  console.error('Unexpected error on idle client', err);
+  process.exit(-1);
+});
 
-    this.pool = new Pool({
-      connectionString: config.database.url,
-      max: config.database.poolSize || 10,
-      idleTimeoutMillis: 30000,
-      connectionTimeoutMillis: 2000,
-    });
+pool.on('connect', () => {
+  console.log('Database connection established');
+});
 
-    this.pool.on('error', (err) => {
-      console.error('Unexpected error on idle client', err);
-      this.isConnected = false;
-    });
-
-    this.pool.on('connect', () => {
-      this.isConnected = true;
-    });
-
-    // Test the connection
-    try {
-      const client = await this.pool.connect();
-      client.release();
-      this.isConnected = true;
-      console.log('Database connected successfully');
-    } catch (err) {
-      console.error('Database connection failed:', err.message);
-      throw err;
-    }
-
-    return this.pool;
-  }
-
-  async disconnect() {
-    if (this.pool) {
-      await this.pool.end();
-      this.pool = null;
-      this.isConnected = false;
-      console.log('Database disconnected');
-    }
-  }
-
-  getPool() {
-    if (!this.pool) {
-      throw new Error('Database not connected. Call connect() first.');
-    }
-    return this.pool;
-  }
-
-  async query(text, params) {
-    const start = Date.now();
-    try {
-      const result = await this.getPool().query(text, params);
-      const duration = Date.now() - start;
-      if (config.env === 'development') {
-        console.log('Executed query', { text: text.substring(0, 50), duration, rows: result.rowCount });
+module.exports = {
+  query: (text, params) => pool.query(text, params),
+  
+  getClient: async () => {
+    const client = await pool.connect();
+    const originalQuery = client.query.bind(client);
+    const originalRelease = client.release.bind(client);
+    
+    // Track if client has been released
+    let released = false;
+    
+    // Override release to prevent double-release
+    client.release = () => {
+      if (released) {
+        console.warn('Client already released, ignoring duplicate release call');
+        return;
       }
-      return result;
-    } catch (err) {
-      console.error('Query error:', { text: text.substring(0, 50), error: err.message });
-      throw err;
-    }
-  }
-
-  async transaction(callback) {
-    const client = await this.getPool().connect();
-    try {
-      await client.query('BEGIN');
-      const result = await callback(client);
-      await client.query('COMMIT');
-      return result;
-    } catch (err) {
-      await client.query('ROLLBACK');
-      throw err;
-    } finally {
-      client.release();
-    }
-  }
-}
-
-module.exports = new Database();
+      released = true;
+      return originalRelease();
+    };
+    
+    // Add timeout for unreleased clients
+    const timeout = setTimeout(() => {
+      if (!released) {
+        console.error('Client has been checked out for too long, releasing');
+        client.release();
+      }
+    }, 30000);
+    
+    client.query = (...args) => {
+      return originalQuery(...args);
+    };
+    
+    // Clear timeout when released
+    const wrappedRelease = client.release;
+    client.release = () => {
+      clearTimeout(timeout);
+      return wrappedRelease();
+    };
+    
+    return client;
+  },
+  
+  pool
+};

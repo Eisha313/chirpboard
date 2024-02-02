@@ -1,162 +1,158 @@
-const { v4: uuidv4 } = require('uuid');
+const db = require('../config/database');
+const { paginate } = require('../utils/dbHelpers');
 
-// Maximum characters allowed per post
 const MAX_POST_LENGTH = 280;
+const HASHTAG_REGEX = /#[a-zA-Z0-9_]+/g;
 
-// Hashtag extraction regex
-const HASHTAG_REGEX = /#[\w]+/g;
-
-/**
- * Service for managing posts, likes, and engagement metrics
- */
 class PostService {
-	constructor() {
-		// In-memory storage (replace with database in production)
-		this.posts = new Map();
-	}
+  extractHashtags(content) {
+    const matches = content.match(HASHTAG_REGEX);
+    if (!matches || matches.length === 0) {
+      return [];
+    }
+    return [...new Set(matches.map(tag => tag.toLowerCase().slice(1)))];
+  }
 
-	/**
-	 * Create a new post with hashtag extraction
-	 * @param {string} userId - Author's user ID
-	 * @param {string} content - Post content
-	 * @returns {Object} Created post object
-	 */
-	createPost(userId, content) {
-		if (content.length > MAX_POST_LENGTH) {
-			throw new Error(`Post exceeds ${MAX_POST_LENGTH} character limit`);
-		}
+  validatePost(content) {
+    if (!content || typeof content !== 'string') {
+      return { valid: false, error: 'Post content is required' };
+    }
+    
+    const trimmed = content.trim();
+    
+    if (trimmed.length === 0) {
+      return { valid: false, error: 'Post content cannot be empty' };
+    }
+    
+    if (trimmed.length > MAX_POST_LENGTH) {
+      return { valid: false, error: `Post exceeds maximum length of ${MAX_POST_LENGTH} characters` };
+    }
+    
+    return { valid: true, content: trimmed };
+  }
 
-		const hashtags = content.match(HASHTAG_REGEX) || [];
-		const post = {
-			id: uuidv4(),
-			userId,
-			content,
-			hashtags: hashtags.map(tag => tag.toLowerCase()),
-			likes: new Set(),
-			likeCount: 0,
-			createdAt: new Date().toISOString(),
-			engagement: 0
-		};
+  async createPost(userId, content) {
+    const validation = this.validatePost(content);
+    if (!validation.valid) {
+      throw new Error(validation.error);
+    }
 
-		this.posts.set(post.id, post);
-		return this._serializePost(post);
-	}
+    const hashtags = this.extractHashtags(validation.content);
+    
+    const query = `
+      INSERT INTO posts (user_id, content, hashtags, engagement_score, like_count, created_at)
+      VALUES ($1, $2, $3, 0, 0, NOW())
+      RETURNING id, user_id, content, hashtags, engagement_score, like_count, created_at
+    `;
+    
+    const result = await db.query(query, [
+      userId, 
+      validation.content, 
+      hashtags.length > 0 ? hashtags : []
+    ]);
+    
+    return {
+      ...result.rows[0],
+      hashtags: result.rows[0].hashtags || []
+    };
+  }
 
-	/**
-	 * Like or unlike a post
-	 * @param {string} postId - Post ID to like
-	 * @param {string} userId - User performing the like
-	 * @returns {Object|null} Updated post or null if not found
-	 */
-	likePost(postId, userId) {
-		const post = this.posts.get(postId);
-		if (!post) return null;
+  async getPostById(postId) {
+    const query = `
+      SELECT 
+        p.id,
+        p.user_id,
+        p.content,
+        p.hashtags,
+        p.engagement_score,
+        p.like_count,
+        p.created_at,
+        u.username,
+        u.display_name,
+        u.avatar_url
+      FROM posts p
+      INNER JOIN users u ON p.user_id = u.id
+      WHERE p.id = $1 AND p.deleted_at IS NULL
+    `;
+    
+    const result = await db.query(query, [postId]);
+    
+    if (result.rows.length === 0) {
+      return null;
+    }
+    
+    return {
+      ...result.rows[0],
+      hashtags: result.rows[0].hashtags || []
+    };
+  }
 
-		if (post.likes.has(userId)) {
-			// Unlike
-			post.likes.delete(userId);
-			post.likeCount--;
-		} else {
-			// Like
-			post.likes.add(userId);
-			post.likeCount++;
-		}
+  async deletePost(postId, userId) {
+    const query = `
+      UPDATE posts 
+      SET deleted_at = NOW()
+      WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL
+      RETURNING id
+    `;
+    
+    const result = await db.query(query, [postId, userId]);
+    return result.rows.length > 0;
+  }
 
-		// Update engagement score
-		post.engagement = this._calculateEngagement(post);
-		return this._serializePost(post);
-	}
+  async getUserPosts(userId, options = {}) {
+    const { page = 1, limit = 20 } = options;
+    const offset = (page - 1) * limit;
 
-	/**
-	 * Get all posts sorted by creation date
-	 * @returns {Array} Array of posts
-	 */
-	getAllPosts() {
-		return Array.from(this.posts.values())
-			.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
-			.map(post => this._serializePost(post));
-	}
+    const query = `
+      SELECT 
+        id,
+        user_id,
+        content,
+        hashtags,
+        engagement_score,
+        like_count,
+        created_at
+      FROM posts
+      WHERE user_id = $1 AND deleted_at IS NULL
+      ORDER BY created_at DESC
+      LIMIT $2 OFFSET $3
+    `;
+    
+    const result = await db.query(query, [userId, limit, offset]);
+    
+    return result.rows.map(row => ({
+      ...row,
+      hashtags: row.hashtags || []
+    }));
+  }
 
-	/**
-	 * Get trending posts based on engagement algorithm
-	 * @param {number} limit - Maximum posts to return
-	 * @returns {Array} Array of trending posts
-	 */
-	getTrendingPosts(limit = 10) {
-		return Array.from(this.posts.values())
-			.map(post => ({
-				...post,
-				engagement: this._calculateEngagement(post)
-			}))
-			.sort((a, b) => b.engagement - a.engagement)
-			.slice(0, limit)
-			.map(post => this._serializePost(post));
-	}
+  async incrementLikeCount(postId) {
+    const query = `
+      UPDATE posts 
+      SET like_count = like_count + 1,
+          engagement_score = engagement_score + 1,
+          updated_at = NOW()
+      WHERE id = $1 AND deleted_at IS NULL
+      RETURNING like_count
+    `;
+    
+    const result = await db.query(query, [postId]);
+    return result.rows[0]?.like_count || 0;
+  }
 
-	/**
-	 * Get posts by a specific user
-	 * @param {string} userId - User ID
-	 * @returns {Array} Array of user's posts
-	 */
-	getPostsByUser(userId) {
-		return Array.from(this.posts.values())
-			.filter(post => post.userId === userId)
-			.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
-			.map(post => this._serializePost(post));
-	}
-
-	/**
-	 * Get personalized feed for user based on who they follow
-	 * @param {string} userId - User ID
-	 * @param {UserService} userService - User service instance
-	 * @returns {Array} Personalized feed
-	 */
-	getFeedForUser(userId, userService) {
-		const user = userService.getUser(userId);
-		if (!user) return this.getAllPosts();
-
-		const following = new Set(user.following);
-		following.add(userId); // Include own posts
-
-		return Array.from(this.posts.values())
-			.filter(post => following.has(post.userId))
-			.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
-			.map(post => this._serializePost(post));
-	}
-
-	/**
-	 * Get total likes received by a user
-	 * @param {string} userId - User ID
-	 * @returns {number} Total likes
-	 */
-	getTotalLikesForUser(userId) {
-		return Array.from(this.posts.values())
-			.filter(post => post.userId === userId)
-			.reduce((total, post) => total + post.likeCount, 0);
-	}
-
-	/**
-	 * Calculate engagement score for trending algorithm
-	 * Considers likes, recency, and hashtag count
-	 */
-	_calculateEngagement(post) {
-		const ageHours = (Date.now() - new Date(post.createdAt)) / (1000 * 60 * 60);
-		const recencyBoost = Math.max(0, 1 - (ageHours / 48)); // Decay over 48 hours
-		const hashtagBoost = post.hashtags.length * 0.1;
-
-		return (post.likeCount * 2) + (recencyBoost * 5) + hashtagBoost;
-	}
-
-	/**
-	 * Serialize post for API response (convert Set to Array)
-	 */
-	_serializePost(post) {
-		return {
-			...post,
-			likes: Array.from(post.likes),
-			engagement: this._calculateEngagement(post)
-		};
-	}
+  async decrementLikeCount(postId) {
+    const query = `
+      UPDATE posts 
+      SET like_count = GREATEST(like_count - 1, 0),
+          engagement_score = GREATEST(engagement_score - 1, 0),
+          updated_at = NOW()
+      WHERE id = $1 AND deleted_at IS NULL
+      RETURNING like_count
+    `;
+    
+    const result = await db.query(query, [postId]);
+    return result.rows[0]?.like_count || 0;
+  }
 }
 
-module.exports = { PostService, MAX_POST_LENGTH };
+module.exports = new PostService();
