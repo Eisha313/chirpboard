@@ -1,155 +1,187 @@
 /**
- * Standardized API response helpers
- * Ensures consistent response format across all endpoints
+ * Standardized API response utilities
  */
 
-class ApiResponse {
-  constructor(success, data = null, message = null, meta = null) {
-    this.success = success;
-    this.data = data;
-    this.message = message;
-    this.meta = meta;
-    this.timestamp = new Date().toISOString();
-  }
-
-  toJSON() {
-    const response = {
-      success: this.success,
-      timestamp: this.timestamp
-    };
-
-    if (this.data !== null) {
-      response.data = this.data;
-    }
-
-    if (this.message !== null) {
-      response.message = this.message;
-    }
-
-    if (this.meta !== null) {
-      response.meta = this.meta;
-    }
-
-    return response;
-  }
-}
+import { HTTP_STATUS } from '../constants/index.js';
 
 /**
- * Success response helper
- * @param {*} data - Response data
- * @param {string} message - Optional success message
- * @param {object} meta - Optional metadata (pagination, etc.)
+ * Create a success response
+ * @param {any} data - Response data
+ * @param {string} [message] - Optional message
+ * @param {Object} [meta] - Optional metadata (pagination, etc.)
+ * @returns {Object}
  */
-function success(data, message = null, meta = null) {
-  return new ApiResponse(true, data, message, meta);
-}
-
-/**
- * Error response helper
- * @param {string} message - Error message
- * @param {number} code - Error code
- * @param {object} details - Additional error details
- */
-function error(message, code = 'UNKNOWN_ERROR', details = null) {
-  const response = new ApiResponse(false, null, message);
-  response.error = {
-    code,
-    details
+export function success(data, message = null, meta = null) {
+  const response = {
+    success: true,
+    data
   };
+
+  if (message) {
+    response.message = message;
+  }
+
+  if (meta) {
+    response.meta = meta;
+  }
+
   return response;
 }
 
 /**
- * Paginated response helper
- * @param {Array} items - Array of items
- * @param {number} page - Current page
- * @param {number} limit - Items per page
- * @param {number} total - Total items count
+ * Create an error response
+ * @param {string} message - Error message
+ * @param {number} [statusCode] - HTTP status code
+ * @param {Object} [errors] - Detailed errors
+ * @returns {Object}
  */
-function paginated(items, page, limit, total) {
+export function error(message, statusCode = HTTP_STATUS.BAD_REQUEST, errors = null) {
+  const response = {
+    success: false,
+    error: {
+      message,
+      statusCode
+    }
+  };
+
+  if (errors) {
+    response.error.details = errors;
+  }
+
+  return response;
+}
+
+/**
+ * Create a paginated response
+ * @param {Array} data - Array of items
+ * @param {Object} pagination - Pagination info
+ * @param {number} pagination.page - Current page
+ * @param {number} pagination.limit - Items per page
+ * @param {number} pagination.total - Total items
+ * @returns {Object}
+ */
+export function paginated(data, { page, limit, total }) {
   const totalPages = Math.ceil(total / limit);
   
-  return success(items, null, {
+  return success(data, null, {
     pagination: {
       page,
       limit,
       total,
       totalPages,
-      hasNext: page < totalPages,
-      hasPrev: page > 1
+      hasNextPage: page < totalPages,
+      hasPreviousPage: page > 1
     }
   });
 }
 
 /**
- * Created response helper (for POST requests)
- * @param {*} data - Created resource
- * @param {string} message - Success message
+ * Create a created response
+ * @param {any} data - Created resource
+ * @param {string} [message] - Optional message
+ * @returns {Object}
  */
-function created(data, message = 'Resource created successfully') {
-  return new ApiResponse(true, data, message);
+export function created(data, message = 'Resource created successfully') {
+  return {
+    success: true,
+    message,
+    data,
+    statusCode: HTTP_STATUS.CREATED
+  };
 }
 
 /**
- * Deleted response helper
- * @param {string} message - Success message
+ * Create a no content response
+ * @param {string} [message] - Optional message
+ * @returns {Object}
  */
-function deleted(message = 'Resource deleted successfully') {
-  return new ApiResponse(true, null, message);
+export function noContent(message = 'Operation completed successfully') {
+  return {
+    success: true,
+    message,
+    statusCode: HTTP_STATUS.NO_CONTENT
+  };
 }
 
 /**
- * Not found response helper
- * @param {string} resource - Resource type that wasn't found
+ * Create a not found response
+ * @param {string} [resource] - Resource name
+ * @returns {Object}
  */
-function notFound(resource = 'Resource') {
-  return error(`${resource} not found`, 'NOT_FOUND');
+export function notFound(resource = 'Resource') {
+  return error(`${resource} not found`, HTTP_STATUS.NOT_FOUND);
 }
 
 /**
- * Validation error response helper
- * @param {object} errors - Validation errors object
+ * Create an unauthorized response
+ * @param {string} [message] - Optional message
+ * @returns {Object}
  */
-function validationError(errors) {
-  return error('Validation failed', 'VALIDATION_ERROR', errors);
+export function unauthorized(message = 'Authentication required') {
+  return error(message, HTTP_STATUS.UNAUTHORIZED);
 }
 
 /**
- * Unauthorized response helper
- * @param {string} message - Error message
+ * Create a forbidden response
+ * @param {string} [message] - Optional message
+ * @returns {Object}
  */
-function unauthorized(message = 'Authentication required') {
-  return error(message, 'UNAUTHORIZED');
+export function forbidden(message = 'Access denied') {
+  return error(message, HTTP_STATUS.FORBIDDEN);
 }
 
 /**
- * Forbidden response helper
- * @param {string} message - Error message
+ * Create a validation error response
+ * @param {Object|Array} errors - Validation errors
+ * @returns {Object}
  */
-function forbidden(message = 'Access denied') {
-  return error(message, 'FORBIDDEN');
+export function validationError(errors) {
+  return error('Validation failed', HTTP_STATUS.UNPROCESSABLE_ENTITY, errors);
 }
 
 /**
- * Rate limit response helper
- * @param {number} retryAfter - Seconds until retry is allowed
+ * Create a conflict response
+ * @param {string} [message] - Optional message
+ * @returns {Object}
  */
-function rateLimited(retryAfter = 60) {
-  const response = error('Rate limit exceeded', 'RATE_LIMITED');
-  response.retryAfter = retryAfter;
+export function conflict(message = 'Resource already exists') {
+  return error(message, HTTP_STATUS.CONFLICT);
+}
+
+/**
+ * Create a rate limit response
+ * @param {number} [retryAfter] - Seconds until retry allowed
+ * @returns {Object}
+ */
+export function rateLimited(retryAfter = 60) {
+  const response = error(
+    'Rate limit exceeded, please try again later',
+    HTTP_STATUS.TOO_MANY_REQUESTS
+  );
+  response.error.retryAfter = retryAfter;
   return response;
 }
 
-module.exports = {
-  ApiResponse,
+/**
+ * Create an internal server error response
+ * @param {string} [message] - Optional message
+ * @returns {Object}
+ */
+export function serverError(message = 'An unexpected error occurred') {
+  return error(message, HTTP_STATUS.INTERNAL_SERVER_ERROR);
+}
+
+export default {
   success,
   error,
   paginated,
   created,
-  deleted,
+  noContent,
   notFound,
-  validationError,
   unauthorized,
   forbidden,
-  rateLimited
+  validationError,
+  conflict,
+  rateLimited,
+  serverError
 };
