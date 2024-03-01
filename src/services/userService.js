@@ -1,177 +1,215 @@
 const db = require('../config/database');
-const {
-  validateUsername,
-  validateEmail,
-  validateBio,
-  validateAvatarUrl,
-  validateId,
-  validatePagination,
-  ValidationError
-} = require('../utils/validators');
+const { dbAll, dbGet, dbRun } = require('../utils/dbHelpers');
+const { logger } = require('../utils/logger');
+const { USER_LIMITS } = require('../constants');
 
+const log = logger.child('UserService');
+
+/**
+ * Create a new user
+ * @param {object} userData - User data
+ * @returns {Promise<object>} The created user
+ */
 async function createUser(userData) {
-  const username = validateUsername(userData.username);
-  const email = validateEmail(userData.email);
-  const displayName = userData.displayName?.trim() || username;
-  const bio = validateBio(userData.bio);
-  const avatarUrl = validateAvatarUrl(userData.avatarUrl);
+  const { username, email, displayName, bio = '', avatarUrl = null } = userData;
 
-  // Check for existing username or email
-  const existing = await db.query(
-    'SELECT id FROM users WHERE username = $1 OR email = $2',
-    [username, email]
-  );
-
-  if (existing.rows.length > 0) {
-    throw new ValidationError('Username or email already exists', 'username');
+  if (!username || !email) {
+    throw new Error('Username and email are required');
   }
 
-  const result = await db.query(
-    `INSERT INTO users (username, email, display_name, bio, avatar_url, created_at)
-     VALUES ($1, $2, $3, $4, $5, NOW())
-     RETURNING id, username, email, display_name, bio, avatar_url, created_at`,
-    [username, email, displayName, bio, avatarUrl]
+  if (username.length > USER_LIMITS.MAX_USERNAME_LENGTH) {
+    throw new Error(`Username exceeds maximum length of ${USER_LIMITS.MAX_USERNAME_LENGTH}`);
+  }
+
+  if (bio && bio.length > USER_LIMITS.MAX_BIO_LENGTH) {
+    throw new Error(`Bio exceeds maximum length of ${USER_LIMITS.MAX_BIO_LENGTH}`);
+  }
+
+  const existingUser = await getUserByUsername(username);
+  if (existingUser) {
+    throw new Error('Username already exists');
+  }
+
+  const id = generateUserId();
+  const createdAt = new Date().toISOString();
+
+  log.debug('Creating new user', { username, email });
+
+  await dbRun(
+    db,
+    `INSERT INTO users (id, username, email, display_name, bio, avatar_url, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    [id, username, email, displayName || username, bio, avatarUrl, createdAt, createdAt]
   );
 
-  return result.rows[0];
+  log.info('User created successfully', { userId: id, username });
+
+  return getUserById(id);
 }
 
+/**
+ * Get a user by ID
+ * @param {string} userId - The user's ID
+ * @returns {Promise<object|null>} The user or null
+ */
 async function getUserById(userId) {
-  const validId = validateId(userId, 'userId');
-
-  const result = await db.query(
-    `SELECT id, username, email, display_name, bio, avatar_url, 
-            follower_count, following_count, post_count, created_at
-     FROM users 
-     WHERE id = $1`,
-    [validId]
+  const user = await dbGet(
+    db,
+    `SELECT u.*,
+            (SELECT COUNT(*) FROM posts WHERE user_id = u.id) as post_count,
+            (SELECT COUNT(*) FROM follows WHERE following_id = u.id) as follower_count,
+            (SELECT COUNT(*) FROM follows WHERE follower_id = u.id) as following_count
+     FROM users u
+     WHERE u.id = ?`,
+    [userId]
   );
 
-  return result.rows[0] || null;
+  if (user) {
+    delete user.password_hash;
+  }
+
+  return user || null;
 }
 
+/**
+ * Get a user by username
+ * @param {string} username - The username
+ * @returns {Promise<object|null>} The user or null
+ */
 async function getUserByUsername(username) {
-  const validUsername = validateUsername(username);
-
-  const result = await db.query(
-    `SELECT id, username, email, display_name, bio, avatar_url,
-            follower_count, following_count, post_count, created_at
-     FROM users 
-     WHERE username = $1`,
-    [validUsername]
+  const user = await dbGet(
+    db,
+    `SELECT u.*,
+            (SELECT COUNT(*) FROM posts WHERE user_id = u.id) as post_count,
+            (SELECT COUNT(*) FROM follows WHERE following_id = u.id) as follower_count,
+            (SELECT COUNT(*) FROM follows WHERE follower_id = u.id) as following_count
+     FROM users u
+     WHERE u.username = ?`,
+    [username]
   );
 
-  return result.rows[0] || null;
+  if (user) {
+    delete user.password_hash;
+  }
+
+  return user || null;
 }
 
+/**
+ * Update user profile
+ * @param {string} userId - The user's ID
+ * @param {object} updates - Fields to update
+ * @returns {Promise<object>} The updated user
+ */
 async function updateUser(userId, updates) {
-  const validId = validateId(userId, 'userId');
-  const fields = [];
-  const values = [];
-  let paramIndex = 1;
+  const allowedFields = ['display_name', 'bio', 'avatar_url'];
+  const updateFields = [];
+  const updateValues = [];
 
-  if (updates.displayName !== undefined) {
-    const displayName = updates.displayName?.trim();
-    if (displayName && displayName.length > 0) {
-      fields.push(`display_name = $${paramIndex++}`);
-      values.push(displayName);
+  for (const [key, value] of Object.entries(updates)) {
+    const dbField = key.replace(/([A-Z])/g, '_$1').toLowerCase();
+    if (allowedFields.includes(dbField)) {
+      updateFields.push(`${dbField} = ?`);
+      updateValues.push(value);
     }
   }
 
-  if (updates.bio !== undefined) {
-    const bio = validateBio(updates.bio);
-    fields.push(`bio = $${paramIndex++}`);
-    values.push(bio);
+  if (updateFields.length === 0) {
+    throw new Error('No valid fields to update');
   }
 
-  if (updates.avatarUrl !== undefined) {
-    const avatarUrl = validateAvatarUrl(updates.avatarUrl);
-    fields.push(`avatar_url = $${paramIndex++}`);
-    values.push(avatarUrl);
-  }
+  updateFields.push('updated_at = ?');
+  updateValues.push(new Date().toISOString());
+  updateValues.push(userId);
 
-  if (fields.length === 0) {
-    throw new ValidationError('No valid fields to update', 'updates');
-  }
+  log.debug('Updating user profile', { userId, fields: updateFields });
 
-  fields.push(`updated_at = NOW()`);
-  values.push(validId);
-
-  const result = await db.query(
-    `UPDATE users 
-     SET ${fields.join(', ')}
-     WHERE id = $${paramIndex}
-     RETURNING id, username, display_name, bio, avatar_url, updated_at`,
-    values
+  await dbRun(
+    db,
+    `UPDATE users SET ${updateFields.join(', ')} WHERE id = ?`,
+    updateValues
   );
 
-  if (result.rows.length === 0) {
-    throw new ValidationError('User not found', 'userId');
-  }
+  log.info('User profile updated', { userId });
 
-  return result.rows[0];
+  return getUserById(userId);
 }
 
+/**
+ * Search users by username or display name
+ * @param {string} query - Search query
+ * @param {object} options - Search options
+ * @returns {Promise<object[]>} Array of matching users
+ */
 async function searchUsers(query, options = {}) {
-  if (!query || typeof query !== 'string' || query.trim().length < 2) {
-    throw new ValidationError('Search query must be at least 2 characters', 'query');
-  }
+  const { limit = 20, offset = 0 } = options;
 
-  const { limit, offset } = validatePagination(options.page, options.limit);
-  const searchTerm = `%${query.trim().toLowerCase()}%`;
+  log.debug('Searching users', { query, limit, offset });
 
-  const result = await db.query(
-    `SELECT id, username, display_name, bio, avatar_url, follower_count
-     FROM users
-     WHERE LOWER(username) LIKE $1 OR LOWER(display_name) LIKE $1
-     ORDER BY follower_count DESC, username ASC
-     LIMIT $2 OFFSET $3`,
-    [searchTerm, limit, offset]
+  const users = await dbAll(
+    db,
+    `SELECT u.id, u.username, u.display_name, u.avatar_url, u.bio,
+            (SELECT COUNT(*) FROM follows WHERE following_id = u.id) as follower_count
+     FROM users u
+     WHERE u.username LIKE ? OR u.display_name LIKE ?
+     ORDER BY follower_count DESC
+     LIMIT ? OFFSET ?`,
+    [`%${query}%`, `%${query}%`, limit, offset]
   );
 
-  return result.rows;
+  return users;
 }
 
-async function updateFollowerCount(userId, increment = 1) {
-  const validId = validateId(userId, 'userId');
+/**
+ * Get user activity feed
+ * @param {string} userId - The user's ID
+ * @param {object} options - Pagination options
+ * @returns {Promise<object[]>} Array of activity items
+ */
+async function getUserActivity(userId, options = {}) {
+  const { limit = 20, offset = 0 } = options;
 
-  const result = await db.query(
-    `UPDATE users 
-     SET follower_count = GREATEST(0, follower_count + $2)
-     WHERE id = $1
-     RETURNING follower_count`,
-    [validId, increment]
+  log.debug('Fetching user activity', { userId, limit, offset });
+
+  return dbAll(
+    db,
+    `SELECT 'post' as type, p.id, p.content, p.created_at
+     FROM posts p
+     WHERE p.user_id = ?
+     UNION ALL
+     SELECT 'like' as type, l.post_id as id, NULL as content, l.created_at
+     FROM likes l
+     WHERE l.user_id = ?
+     ORDER BY created_at DESC
+     LIMIT ? OFFSET ?`,
+    [userId, userId, limit, offset]
   );
-
-  return result.rows[0]?.follower_count || 0;
 }
 
-async function updateFollowingCount(userId, increment = 1) {
-  const validId = validateId(userId, 'userId');
+/**
+ * Delete a user account
+ * @param {string} userId - The user's ID
+ * @returns {Promise<boolean>} Success status
+ */
+async function deleteUser(userId) {
+  log.warn('Deleting user account', { userId });
 
-  const result = await db.query(
-    `UPDATE users 
-     SET following_count = GREATEST(0, following_count + $2)
-     WHERE id = $1
-     RETURNING following_count`,
-    [validId, increment]
-  );
+  await dbRun(db, 'DELETE FROM likes WHERE user_id = ?', [userId]);
+  await dbRun(db, 'DELETE FROM follows WHERE follower_id = ? OR following_id = ?', [userId, userId]);
+  await dbRun(db, 'DELETE FROM posts WHERE user_id = ?', [userId]);
+  await dbRun(db, 'DELETE FROM users WHERE id = ?', [userId]);
 
-  return result.rows[0]?.following_count || 0;
+  log.info('User account deleted', { userId });
+
+  return true;
 }
 
-async function incrementPostCount(userId, increment = 1) {
-  const validId = validateId(userId, 'userId');
-
-  const result = await db.query(
-    `UPDATE users 
-     SET post_count = GREATEST(0, post_count + $2)
-     WHERE id = $1
-     RETURNING post_count`,
-    [validId, increment]
-  );
-
-  return result.rows[0]?.post_count || 0;
+/**
+ * Generate a unique user ID
+ * @returns {string} Unique user ID
+ */
+function generateUserId() {
+  return `user_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 }
 
 module.exports = {
@@ -180,7 +218,6 @@ module.exports = {
   getUserByUsername,
   updateUser,
   searchUsers,
-  updateFollowerCount,
-  updateFollowingCount,
-  incrementPostCount
+  getUserActivity,
+  deleteUser
 };

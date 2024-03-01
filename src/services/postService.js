@@ -1,137 +1,179 @@
 const db = require('../config/database');
-const { extractHashtags, extractMentions } = require('../utils/textParser');
-const { validatePostContent, validateId, validatePagination, ValidationError } = require('../utils/validators');
+const { dbAll, dbGet, dbRun } = require('../utils/dbHelpers');
+const { logger } = require('../utils/logger');
+const { POST_LIMITS } = require('../constants');
 
-const POST_MAX_LENGTH = 280;
+const log = logger.child('PostService');
 
+/**
+ * Create a new post
+ * @param {string} userId - The user's ID
+ * @param {string} content - The post content
+ * @returns {Promise<object>} The created post
+ */
 async function createPost(userId, content) {
-  const validUserId = validateId(userId, 'userId');
-  const validContent = validatePostContent(content);
+  if (!content || content.length === 0) {
+    throw new Error('Post content cannot be empty');
+  }
 
-  const hashtags = extractHashtags(validContent);
-  const mentions = extractMentions(validContent);
+  if (content.length > POST_LIMITS.MAX_CONTENT_LENGTH) {
+    throw new Error(`Post content exceeds maximum length of ${POST_LIMITS.MAX_CONTENT_LENGTH} characters`);
+  }
 
-  const result = await db.query(
-    `INSERT INTO posts (user_id, content, hashtags, mentions, created_at)
-     VALUES ($1, $2, $3, $4, NOW())
-     RETURNING id, user_id, content, hashtags, mentions, like_count, created_at`,
-    [validUserId, validContent, JSON.stringify(hashtags), JSON.stringify(mentions)]
+  const id = generatePostId();
+  const createdAt = new Date().toISOString();
+
+  log.debug('Creating new post', { userId, contentLength: content.length });
+
+  await dbRun(
+    db,
+    `INSERT INTO posts (id, user_id, content, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?)`,
+    [id, userId, content, createdAt, createdAt]
   );
 
-  return result.rows[0];
+  log.info('Post created successfully', { postId: id, userId });
+
+  return getPostById(id);
 }
 
+/**
+ * Get a post by ID
+ * @param {string} postId - The post ID
+ * @returns {Promise<object|null>} The post or null
+ */
 async function getPostById(postId) {
-  const validPostId = validateId(postId, 'postId');
-
-  const result = await db.query(
-    `SELECT p.*, u.username, u.display_name, u.avatar_url
-     FROM posts p
-     JOIN users u ON p.user_id = u.id
-     WHERE p.id = $1 AND p.deleted_at IS NULL`,
-    [validPostId]
-  );
-
-  return result.rows[0] || null;
-}
-
-async function getUserPosts(userId, options = {}) {
-  const validUserId = validateId(userId, 'userId');
-  const { limit, offset } = validatePagination(options.page, options.limit);
-
-  const result = await db.query(
-    `SELECT p.*, u.username, u.display_name, u.avatar_url
-     FROM posts p
-     JOIN users u ON p.user_id = u.id
-     WHERE p.user_id = $1 AND p.deleted_at IS NULL
-     ORDER BY p.created_at DESC
-     LIMIT $2 OFFSET $3`,
-    [validUserId, limit, offset]
-  );
-
-  return result.rows;
-}
-
-async function deletePost(postId, userId) {
-  const validPostId = validateId(postId, 'postId');
-  const validUserId = validateId(userId, 'userId');
-
-  const result = await db.query(
-    `UPDATE posts 
-     SET deleted_at = NOW()
-     WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL
-     RETURNING id`,
-    [validPostId, validUserId]
-  );
-
-  if (result.rows.length === 0) {
-    throw new ValidationError('Post not found or already deleted', 'postId');
-  }
-
-  return { success: true, postId: validPostId };
-}
-
-async function getPostsByHashtag(hashtag, options = {}) {
-  if (!hashtag || typeof hashtag !== 'string') {
-    throw new ValidationError('Hashtag is required', 'hashtag');
-  }
-
-  const { limit, offset } = validatePagination(options.page, options.limit);
-  const normalizedTag = hashtag.toLowerCase().replace(/^#/, '');
-
-  const result = await db.query(
-    `SELECT p.*, u.username, u.display_name, u.avatar_url
-     FROM posts p
-     JOIN users u ON p.user_id = u.id
-     WHERE p.hashtags::jsonb ? $1 AND p.deleted_at IS NULL
-     ORDER BY p.created_at DESC
-     LIMIT $2 OFFSET $3`,
-    [normalizedTag, limit, offset]
-  );
-
-  return result.rows;
-}
-
-async function getTrendingPosts(options = {}) {
-  const { limit, offset } = validatePagination(options.page, options.limit);
-  const hoursAgo = options.hours || 24;
-
-  const result = await db.query(
+  const post = await dbGet(
+    db,
     `SELECT p.*, u.username, u.display_name, u.avatar_url,
-            (p.like_count * 2 + p.reply_count) AS engagement_score
+            (SELECT COUNT(*) FROM likes WHERE post_id = p.id) as like_count,
+            (SELECT COUNT(*) FROM posts WHERE reply_to_id = p.id) as reply_count
      FROM posts p
      JOIN users u ON p.user_id = u.id
-     WHERE p.created_at > NOW() - INTERVAL '${hoursAgo} hours'
-       AND p.deleted_at IS NULL
-     ORDER BY engagement_score DESC, p.created_at DESC
-     LIMIT $1 OFFSET $2`,
-    [limit, offset]
+     WHERE p.id = ?`,
+    [postId]
   );
 
-  return result.rows;
+  return post || null;
 }
 
-async function incrementLikeCount(postId, increment = 1) {
-  const validPostId = validateId(postId, 'postId');
+/**
+ * Get posts by user ID with pagination
+ * @param {string} userId - The user's ID
+ * @param {object} options - Pagination options
+ * @returns {Promise<object[]>} Array of posts
+ */
+async function getPostsByUserId(userId, options = {}) {
+  const { limit = 20, offset = 0, includeReplies = false } = options;
 
-  const result = await db.query(
-    `UPDATE posts 
-     SET like_count = GREATEST(0, like_count + $2)
-     WHERE id = $1 AND deleted_at IS NULL
-     RETURNING like_count`,
-    [validPostId, increment]
+  let query = `
+    SELECT p.*, u.username, u.display_name, u.avatar_url,
+           (SELECT COUNT(*) FROM likes WHERE post_id = p.id) as like_count,
+           (SELECT COUNT(*) FROM posts WHERE reply_to_id = p.id) as reply_count
+    FROM posts p
+    JOIN users u ON p.user_id = u.id
+    WHERE p.user_id = ?
+  `;
+
+  if (!includeReplies) {
+    query += ' AND p.reply_to_id IS NULL';
+  }
+
+  query += ' ORDER BY p.created_at DESC LIMIT ? OFFSET ?';
+
+  log.debug('Fetching posts by user', { userId, limit, offset });
+
+  return dbAll(db, query, [userId, limit, offset]);
+}
+
+/**
+ * Delete a post
+ * @param {string} postId - The post ID
+ * @param {string} userId - The user ID (for authorization)
+ * @returns {Promise<boolean>} Success status
+ */
+async function deletePost(postId, userId) {
+  const post = await getPostById(postId);
+
+  if (!post) {
+    throw new Error('Post not found');
+  }
+
+  if (post.user_id !== userId) {
+    throw new Error('Unauthorized to delete this post');
+  }
+
+  await dbRun(db, 'DELETE FROM posts WHERE id = ?', [postId]);
+  
+  log.info('Post deleted', { postId, userId });
+
+  return true;
+}
+
+/**
+ * Search posts by content
+ * @param {string} query - Search query
+ * @param {object} options - Search options
+ * @returns {Promise<object[]>} Array of matching posts
+ */
+async function searchPosts(query, options = {}) {
+  const { limit = 20, offset = 0 } = options;
+
+  log.debug('Searching posts', { query, limit, offset });
+
+  return dbAll(
+    db,
+    `SELECT p.*, u.username, u.display_name, u.avatar_url,
+            (SELECT COUNT(*) FROM likes WHERE post_id = p.id) as like_count,
+            (SELECT COUNT(*) FROM posts WHERE reply_to_id = p.id) as reply_count
+     FROM posts p
+     JOIN users u ON p.user_id = u.id
+     WHERE p.content LIKE ?
+     ORDER BY p.created_at DESC
+     LIMIT ? OFFSET ?`,
+    [`%${query}%`, limit, offset]
   );
+}
 
-  return result.rows[0]?.like_count || 0;
+/**
+ * Get trending posts
+ * @param {object} options - Options for trending algorithm
+ * @returns {Promise<object[]>} Array of trending posts
+ */
+async function getTrendingPosts(options = {}) {
+  const { limit = 10, hoursAgo = 24 } = options;
+  const cutoffDate = new Date(Date.now() - hoursAgo * 60 * 60 * 1000).toISOString();
+
+  log.debug('Fetching trending posts', { limit, hoursAgo });
+
+  return dbAll(
+    db,
+    `SELECT p.*, u.username, u.display_name, u.avatar_url,
+            (SELECT COUNT(*) FROM likes WHERE post_id = p.id) as like_count,
+            (SELECT COUNT(*) FROM posts WHERE reply_to_id = p.id) as reply_count,
+            (SELECT COUNT(*) FROM likes WHERE post_id = p.id AND created_at > ?) as recent_likes
+     FROM posts p
+     JOIN users u ON p.user_id = u.id
+     WHERE p.created_at > ?
+     ORDER BY recent_likes DESC, p.created_at DESC
+     LIMIT ?`,
+    [cutoffDate, cutoffDate, limit]
+  );
+}
+
+/**
+ * Generate a unique post ID
+ * @returns {string} Unique post ID
+ */
+function generatePostId() {
+  return `post_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 }
 
 module.exports = {
   createPost,
   getPostById,
-  getUserPosts,
+  getPostsByUserId,
   deletePost,
-  getPostsByHashtag,
-  getTrendingPosts,
-  incrementLikeCount,
-  POST_MAX_LENGTH
+  searchPosts,
+  getTrendingPosts
 };
