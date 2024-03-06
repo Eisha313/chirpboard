@@ -21,7 +21,19 @@ pool.on('connect', () => {
   console.log('Database connection established');
 });
 
+async function initializeDatabase() {
+  try {
+    const client = await pool.connect();
+    await client.query('SELECT 1');
+    client.release();
+    console.log('Database initialized successfully');
+  } catch (err) {
+    console.warn('Database not available, running in limited mode:', err.message);
+  }
+}
+
 module.exports = {
+  initializeDatabase,
   query: (text, params) => pool.query(text, params),
   
   getClient: async () => {

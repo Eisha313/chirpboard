@@ -5,7 +5,11 @@ const config = {
   port: parseInt(process.env.PORT, 10) || 3000,
   
   database: {
-    url: process.env.DATABASE_URL || 'postgresql://localhost:5432/chirpboard',
+    host: process.env.DB_HOST || 'localhost',
+    port: parseInt(process.env.DB_PORT, 10) || 5432,
+    name: process.env.DB_NAME || 'chirpboard',
+    user: process.env.DB_USER || 'postgres',
+    password: process.env.DB_PASSWORD || '',
     poolSize: parseInt(process.env.DB_POOL_SIZE, 10) || 10,
   },
   
@@ -32,7 +36,17 @@ const config = {
   leaderboard: {
     cacheTimeSeconds: 300,
     topUsersLimit: 50,
-  }
+  },
+
+  rateLimit: {
+    windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS, 10) || 15 * 60 * 1000,
+    max: parseInt(process.env.RATE_LIMIT_MAX, 10) || 100,
+  },
+
+  cors: {
+    origin: process.env.CORS_ORIGIN || '*',
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'],
+  },
 };
 
 // Validate required config in production
