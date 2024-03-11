@@ -3,38 +3,38 @@
  */
 
 // Post limits
-export const POST_MAX_LENGTH = 280;
-export const POST_MIN_LENGTH = 1;
-export const HASHTAG_MAX_LENGTH = 50;
-export const MAX_HASHTAGS_PER_POST = 10;
+const POST_MAX_LENGTH = 280;
+const POST_MIN_LENGTH = 1;
+const HASHTAG_MAX_LENGTH = 50;
+const MAX_HASHTAGS_PER_POST = 10;
 
 // User limits
-export const USERNAME_MIN_LENGTH = 3;
-export const USERNAME_MAX_LENGTH = 30;
-export const BIO_MAX_LENGTH = 160;
-export const DISPLAY_NAME_MAX_LENGTH = 50;
+const USERNAME_MIN_LENGTH = 3;
+const USERNAME_MAX_LENGTH = 30;
+const BIO_MAX_LENGTH = 160;
+const DISPLAY_NAME_MAX_LENGTH = 50;
 
 // Pagination defaults
-export const DEFAULT_PAGE_SIZE = 20;
-export const MAX_PAGE_SIZE = 100;
-export const DEFAULT_PAGE = 1;
+const DEFAULT_PAGE_SIZE = 20;
+const MAX_PAGE_SIZE = 100;
+const DEFAULT_PAGE = 1;
 
 // Feed settings
-export const FEED_DEFAULT_LIMIT = 50;
-export const FEED_MAX_LIMIT = 100;
+const FEED_DEFAULT_LIMIT = 50;
+const FEED_MAX_LIMIT = 100;
 
 // Leaderboard settings
-export const LEADERBOARD_CACHE_TTL = 3600; // 1 hour in seconds
-export const LEADERBOARD_DEFAULT_LIMIT = 10;
-export const LEADERBOARD_MAX_LIMIT = 50;
+const LEADERBOARD_CACHE_TTL = 3600;
+const LEADERBOARD_DEFAULT_LIMIT = 10;
+const LEADERBOARD_MAX_LIMIT = 50;
 
 // Trending settings
-export const TRENDING_WINDOW_HOURS = 24;
-export const TRENDING_MIN_ENGAGEMENT = 5;
-export const TRENDING_HASHTAGS_LIMIT = 10;
+const TRENDING_WINDOW_HOURS = 24;
+const TRENDING_MIN_ENGAGEMENT = 5;
+const TRENDING_HASHTAGS_LIMIT = 10;
 
 // Reaction types
-export const REACTION_TYPES = {
+const REACTION_TYPES = {
   LIKE: 'like',
   LOVE: 'love',
   LAUGH: 'laugh',
@@ -43,10 +43,10 @@ export const REACTION_TYPES = {
   ANGRY: 'angry'
 };
 
-export const VALID_REACTION_TYPES = Object.values(REACTION_TYPES);
+const VALID_REACTION_TYPES = Object.values(REACTION_TYPES);
 
 // Activity types
-export const ACTIVITY_TYPES = {
+const ACTIVITY_TYPES = {
   POST: 'post',
   LIKE: 'like',
   FOLLOW: 'follow',
@@ -54,7 +54,7 @@ export const ACTIVITY_TYPES = {
 };
 
 // Leaderboard types
-export const LEADERBOARD_TYPES = {
+const LEADERBOARD_TYPES = {
   MOST_POSTS: 'most_posts',
   MOST_LIKED: 'most_liked',
   MOST_FOLLOWERS: 'most_followers',
@@ -62,7 +62,7 @@ export const LEADERBOARD_TYPES = {
 };
 
 // Time periods for analytics
-export const TIME_PERIODS = {
+const TIME_PERIODS = {
   DAY: 'day',
   WEEK: 'week',
   MONTH: 'month',
@@ -70,7 +70,7 @@ export const TIME_PERIODS = {
 };
 
 // HTTP status codes
-export const HTTP_STATUS = {
+const HTTP_STATUS = {
   OK: 200,
   CREATED: 201,
   NO_CONTENT: 204,
@@ -85,7 +85,7 @@ export const HTTP_STATUS = {
 };
 
 // Error messages
-export const ERROR_MESSAGES = {
+const ERROR_MESSAGES = {
   POST_NOT_FOUND: 'Post not found',
   USER_NOT_FOUND: 'User not found',
   UNAUTHORIZED: 'Authentication required',
@@ -101,7 +101,7 @@ export const ERROR_MESSAGES = {
   RATE_LIMIT_EXCEEDED: 'Rate limit exceeded, please try again later'
 };
 
-export default {
+module.exports = {
   POST_MAX_LENGTH,
   POST_MIN_LENGTH,
   HASHTAG_MAX_LENGTH,
